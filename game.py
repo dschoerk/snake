@@ -93,8 +93,9 @@ class SnakeGame:
         go_left = self.gamestate.food.x < h.x
         go_right = self.gamestate.food.x > h.x
 
-
-        return np.append(np.array([go_up, go_down, go_left, go_right, self.gamestate.reward, len(self.gamestate.body)], dtype=np.int32), local_map.flatten())
+        # self.gamestate.reward
+        # return np.append(np.array([go_up, go_down, go_left, go_right, len(self.gamestate.body)], dtype=np.float32), local_map.flatten())
+        return np.array([go_up, go_down, go_left, go_right, len(self.gamestate.body)], dtype=np.float32)
     
     def draw(self, observation=None):
         map = np.zeros((self.gamestate.field_size.y, self.gamestate.field_size.x), dtype=np.str_)

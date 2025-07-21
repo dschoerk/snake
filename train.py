@@ -19,8 +19,8 @@ EPS_DECAY = 2500
 TAU = 0.005
 LR = 1e-3
 
-wnd = 7 * 2 + 1
-n_observations = 4 + 1 + 1 + wnd*wnd #10*10
+wnd = 2 * 2 + 1
+n_observations = 4 + 1 # + wnd*wnd #10*10
 n_actions = 4
 
 policy_net = DQN(n_observations, n_actions).to(device)

@@ -8,7 +8,7 @@ import pygame
 from network import DQN, EnsembleDQN
 
 class PygameSnakeGame:
-    def __init__(self, field_size=(10, 10), cell_size=25, wnd=7):
+    def __init__(self, field_size=(10, 10), cell_size=25, wnd=0):
         pygame.init()
         
         self.field_size = field_size
