@@ -1,13 +1,10 @@
 import argparse
-from itertools import count
 import math
-import random
 import torch
-
 import torch.nn as nn
 
-from game import SnakeGame
-from memory import ReplayMemory, Transition
+from vec_game import VecSnakeGame
+from memory import TensorReplayMemory
 from network import DQN
 
 parser = argparse.ArgumentParser()
@@ -15,18 +12,23 @@ parser.add_argument('--no-resume', action='store_true', help='Start training fro
 args = parser.parse_args()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
-BATCH_SIZE = 128
+BATCH_SIZE = 1024
 GAMMA = 0.99
 EPS_START = 0.9
 EPS_END = 0.01
 EPS_DECAY = 2500
 TAU = 0.005
 LR = 1e-3
+NUM_ENVS = 256
+OPT_STEPS_PER_COLLECT = 4
+EVAL_INTERVAL = 50
+EVAL_GAMES = 100
 
 wnd = 2 * 2 + 1
-n_scalar      = 12        # food(4) + danger(3) + direction(4) + body_len(1)
-grid_size     = 7
+n_scalar = 12
+grid_size = 7
 n_observations = n_scalar + grid_size * grid_size  # 61
 n_actions = 4
 
@@ -46,122 +48,120 @@ target_net = DQN(n_observations, n_actions, n_scalar=n_scalar, grid_size=grid_si
 target_net.load_state_dict(policy_net.state_dict())
 
 optimizer = torch.optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
-memory = ReplayMemory(100_000)
+memory = TensorReplayMemory(200_000, n_observations, device)
 
-game = SnakeGame(wnd=wnd, field_size=(20, 20))
-game.reset()
-
+vec_env = VecSnakeGame(NUM_ENVS, device=device)
 steps_done = 0
 
-def select_action(state):
+
+def select_actions_batch(states_tensor):
     global steps_done
-    sample = random.random()
     eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY)
     steps_done += 1
-    if sample > eps_threshold:
-        policy_net.eval()
-        with torch.no_grad():
-            action = policy_net(state).max(1).indices.view(1, 1)
-        policy_net.train()
-        return action
-    else:
-        return torch.tensor([[random.randint(0,3)]], device=device, dtype=torch.long)
+
+    batch_size = states_tensor.shape[0]
+    with torch.no_grad():
+        greedy_actions = policy_net(states_tensor).max(1).indices
+
+    random_mask = torch.rand(batch_size, device=device) < eps_threshold
+    random_actions = torch.randint(0, n_actions, (batch_size,), device=device)
+    return torch.where(random_mask, random_actions, greedy_actions)
 
 
 def optimize_model():
     if len(memory) < BATCH_SIZE:
-        return
-    transitions = memory.sample(BATCH_SIZE)
-    batch = Transition(*zip(*transitions))
+        return None
 
-    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                          batch.next_state)), device=device, dtype=torch.bool)
-    non_final_next_states = torch.cat([s for s in batch.next_state
-                                                if s is not None])
+    states, actions, rewards, next_states, non_final_mask = memory.sample(BATCH_SIZE)
 
-    state_batch = torch.cat(batch.state)
-    action_batch = torch.cat(batch.action)
-    reward_batch = torch.cat(batch.reward)
-
-    state_action_values = policy_net(state_batch)
-    state_action_values = state_action_values.gather(1, action_batch)
+    state_action_values = policy_net(states).gather(1, actions)
 
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1).values
-    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+    if non_final_mask.any():
+        with torch.no_grad():
+            next_state_values[non_final_mask] = target_net(next_states[non_final_mask]).max(1).values
+    expected = (next_state_values * GAMMA) + rewards
 
-    criterion = nn.SmoothL1Loss()
-    loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+    loss = nn.functional.smooth_l1_loss(state_action_values, expected.unsqueeze(1))
 
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
-
     return loss
 
 
-num_episodes = 25000
-
-best_len = 0
-
-for i_episode in range(num_episodes):
-    game.reset(random_field_size=True)
-    state = game.observation()
-
-    state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    for t in count():
-        action = select_action(state)
-        observation, reward, terminated = game.update(action.item())
-
-        reward = torch.tensor([reward], device=device)
-        done = terminated
-
-        if terminated:
-            next_state = None
-        else:
-            next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-
-        memory.push(state, action, next_state, reward)
-
-        state = next_state
-
-        loss = optimize_model()
-
-        # Soft update of the target network's weights
-        target_net_state_dict = target_net.state_dict()
-        policy_net_state_dict = policy_net.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
-        target_net.load_state_dict(target_net_state_dict)
-
-        if done:
-            if len(game.gamestate.body) > best_len:
-                best_len = len(game.gamestate.body)
-                torch.save(policy_net.state_dict(), 'best.pt')
-                memory.save('memory.pickle')
-                print(best_len)
-
-            if i_episode % 10 == 0 and i_episode > 0:
-                print(f"Episode {i_episode}, Step {t}, Loss: {loss.item() if loss is not None else 'N/A'}, Best Length: {best_len}")
-
-                policy_net.eval()
-                total_reward = 0
-                eval_best_len = 0
-                for _ in range(100):
-                    eval_game = SnakeGame(wnd=wnd, field_size=(20, 20))
-                    eval_game.reset(random_field_size=True)
-                    while True:
-                        eval_state = torch.tensor(eval_game.observation(), dtype=torch.float32, device=device).unsqueeze(0)
-                        with torch.no_grad():
-                            eval_action = policy_net(eval_state).max(1).indices.view(1, 1)
-                        _, _, eval_terminated = eval_game.update(eval_action.item())
-                        if eval_terminated:
-                            total_reward += eval_game.gamestate.reward
-                            eval_best_len = max(eval_best_len, len(eval_game.gamestate.body))
-                            break
-                policy_net.train()
-                print(f"Average reward: {total_reward / 100}, Eval best len: {eval_best_len}")
-
+def run_eval():
+    """Run greedy eval on GPU using VecSnakeGame."""
+    eval_env = VecSnakeGame(EVAL_GAMES, device=device)
+    policy_net.eval()
+    states = eval_env.observations()
+    alive = torch.ones(EVAL_GAMES, dtype=torch.bool, device=device)
+    total_rewards = torch.zeros(EVAL_GAMES, device=device)
+    final_lens = torch.ones(EVAL_GAMES, dtype=torch.int32, device=device)
+    max_steps = 5000
+    for _ in range(max_steps):
+        if not alive.any():
             break
+        with torch.no_grad():
+            actions = policy_net(states).max(1).indices
+        next_states, rewards, dones, body_lens = eval_env.step(actions)
+        total_rewards += rewards * alive.float()
+        just_died = dones & alive
+        if just_died.any():
+            final_lens[just_died] = body_lens[just_died]
+        alive &= ~dones
+        states = next_states
+    policy_net.train()
+    avg_reward = total_rewards.mean().item()
+    eval_best_len = final_lens.max().item()
+    return avg_reward, eval_best_len
+
+
+num_episodes = 25000
+best_len = 0
+best_reward = float('-inf')
+episode_count = 0
+last_eval_episode = 0
+
+# Initial observations — already on device
+states_tensor = vec_env.observations()
+
+while episode_count < num_episodes:
+    actions = select_actions_batch(states_tensor)
+
+    # Step all envs on GPU — no CPU involved
+    next_states_tensor, rewards_tensor, dones_tensor, _ = vec_env.step(actions)
+
+    # Push entire batch to replay buffer — all GPU tensors
+    memory.push_batch(states_tensor, actions, rewards_tensor, next_states_tensor, dones_tensor)
+
+    episode_count += dones_tensor.sum().item()
+
+    # Eval check
+    if episode_count - last_eval_episode >= EVAL_INTERVAL:
+        last_eval_episode = episode_count
+
+        avg_reward, eval_best_len = run_eval()
+        last_loss = optimize_model()
+
+        if eval_best_len > best_len or (eval_best_len == best_len and avg_reward > best_reward):
+            best_len = eval_best_len
+            best_reward = avg_reward
+            torch.save(policy_net.state_dict(), 'best.pt')
+            memory.save('memory.pickle')
+            print(f"* New best saved: len={best_len}, reward={best_reward:.1f}")
+
+        print(f"Episode {episode_count}, Loss: {last_loss.item() if last_loss is not None else 'N/A'}, Eval best len: {eval_best_len}, Avg reward: {avg_reward:.1f}")
+
+    # Update states
+    states_tensor = next_states_tensor
+
+    # GPU optimization steps
+    for _ in range(OPT_STEPS_PER_COLLECT):
+        optimize_model()
+
+    # Soft update target network
+    with torch.no_grad():
+        for p_target, p_policy in zip(target_net.parameters(), policy_net.parameters()):
+            p_target.data.mul_(1 - TAU).add_(p_policy.data, alpha=TAU)
