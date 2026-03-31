@@ -19,10 +19,16 @@ export default function SnakeGame() {
   const [gameStarted, setGameStarted] = useState(false);
   const ortSessionRef = React.useRef(null);
 
-  // Generate random food position
-  const generateFood = useCallback(() => {
-    const x = Math.floor(Math.random() * (CANVAS_SIZE / GRID_SIZE));
-    const y = Math.floor(Math.random() * (CANVAS_SIZE / GRID_SIZE));
+  // Generate random food position not overlapping the snake
+  const generateFood = useCallback((currentSnake: {x: number, y: number}[]) => {
+    const gridW = CANVAS_SIZE / GRID_SIZE;
+    const gridH = CANVAS_SIZE / GRID_SIZE;
+    const occupied = new Set(currentSnake.map(s => `${s.x},${s.y}`));
+    let x: number, y: number;
+    do {
+      x = Math.floor(Math.random() * gridW);
+      y = Math.floor(Math.random() * gridH);
+    } while (occupied.has(`${x},${y}`));
     return { x, y };
   }, []);
 
@@ -50,7 +56,7 @@ export default function SnakeGame() {
         ortSessionRef.current = await ort.InferenceSession.create('/dqn_model.onnx');
       }
       const input = new ort.Tensor('float32', Float32Array.from(inputArray), [1, inputArray.length]);
-      const feeds = { "onnx::Gemm_0": input };
+      const feeds = { "observations": input };
       return ortSessionRef.current.run(feeds);
     }
 
@@ -117,7 +123,8 @@ export default function SnakeGame() {
       snake.length / (gridW * gridH),
       ...localGrid
     ]);
-    const pred_dir = argmax(model_output[11].cpuData)
+    const qValues = model_output["q_values"] ?? Object.values(model_output)[0];
+    const pred_dir = argmax(qValues.cpuData);
     console.log("Model output:", pred_dir);
 
     // Compute new direction locally to avoid stale closure in setSnake
@@ -150,7 +157,7 @@ export default function SnakeGame() {
       // Check if food is eaten
       if (willEatFood) {
         setScore(s => s + 10);
-        setFood(generateFood());
+        setFood(generateFood(newSnake));
       } else {
         newSnake.pop();
       }
@@ -169,7 +176,7 @@ export default function SnakeGame() {
     if (gameOver && e.key === ' ') {
       // Restart game
       setSnake(INITIAL_SNAKE);
-      setFood(INITIAL_FOOD);
+      setFood(generateFood(INITIAL_SNAKE));
       setDirection(INITIAL_DIRECTION);
       setGameOver(false);
       setScore(0);

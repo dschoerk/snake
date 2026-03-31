@@ -49,6 +49,7 @@ target_net.load_state_dict(policy_net.state_dict())
 
 optimizer = torch.optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 memory = TensorReplayMemory(200_000, n_observations, device)
+memory.load('memory.pickle')  # Load replay buffer if it exists, otherwise start fresh
 
 vec_env = VecSnakeGame(NUM_ENVS, device=device)
 steps_done = 0

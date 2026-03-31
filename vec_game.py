@@ -69,8 +69,17 @@ class VecSnakeGame:
         self.visit_grid[mask] = 0
         idx = torch.where(mask)[0]
         self.visit_grid[idx, 5, 5] = 1
-        self.food_x[mask] = (torch.rand(count, device=self.device) * self.field_w[mask].float()).int()
-        self.food_y[mask] = (torch.rand(count, device=self.device) * self.field_h[mask].float()).int()
+        # Spawn food avoiding the initial head position (5,5)
+        fx = (torch.rand(count, device=self.device) * self.field_w[mask].float()).int()
+        fy = (torch.rand(count, device=self.device) * self.field_h[mask].float()).int()
+        on_head = (fx == 5) & (fy == 5)
+        while on_head.any():
+            n_retry = on_head.sum().item()
+            fx[on_head] = (torch.rand(n_retry, device=self.device) * self.field_w[mask][on_head].float()).int()
+            fy[on_head] = (torch.rand(n_retry, device=self.device) * self.field_h[mask][on_head].float()).int()
+            on_head = (fx == 5) & (fy == 5)
+        self.food_x[mask] = fx
+        self.food_y[mask] = fy
 
     def step(self, actions):
         """Step all envs. actions: (n,) long tensor on device.
@@ -97,11 +106,26 @@ class VecSnakeGame:
         ate_food = (self.head_x == self.food_x) & (self.head_y == self.food_y)
         self.body_len += ate_food.int()
 
-        # Respawn food
-        n_eaters = ate_food.sum().item()
-        if n_eaters > 0:
-            self.food_x[ate_food] = (torch.rand(n_eaters, device=self.device) * self.field_w[ate_food].float()).int()
-            self.food_y[ate_food] = (torch.rand(n_eaters, device=self.device) * self.field_h[ate_food].float()).int()
+        # Respawn food — reject positions that land on the snake body
+        eater_idx = torch.where(ate_food)[0]
+        if len(eater_idx) > 0:
+            fx = (torch.rand(len(eater_idx), device=self.device) * self.field_w[eater_idx].float()).int()
+            fy = (torch.rand(len(eater_idx), device=self.device) * self.field_h[eater_idx].float()).int()
+            # Retry up to 16 times for positions that collide with body
+            for _ in range(16):
+                clip_fx = fx.clamp(0, self.max_field - 1)
+                clip_fy = fy.clamp(0, self.max_field - 1)
+                visit_time = self.visit_grid[eater_idx, clip_fy, clip_fx]
+                threshold = self.step_count[eater_idx] - self.body_len[eater_idx]
+                on_body = visit_time > threshold
+                if not on_body.any():
+                    break
+                n_retry = on_body.sum().item()
+                retry_envs = eater_idx[on_body]
+                fx[on_body] = (torch.rand(n_retry, device=self.device) * self.field_w[retry_envs].float()).int()
+                fy[on_body] = (torch.rand(n_retry, device=self.device) * self.field_h[retry_envs].float()).int()
+            self.food_x[eater_idx] = fx
+            self.food_y[eater_idx] = fy
             self.last_food_step[ate_food] = self.step_count[ate_food]
 
         # Wall collision
