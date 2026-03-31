@@ -17,6 +17,7 @@ export default function SnakeGame() {
   const [gameOver, setGameOver] = useState(false);
   const [score, setScore] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
+  const ortSessionRef = React.useRef(null);
 
   // Generate random food position
   const generateFood = useCallback(() => {
@@ -45,22 +46,39 @@ export default function SnakeGame() {
     if (!gameStarted || gameOver) return;
 
     async function runModel(inputArray) {
-      const session = await ort.InferenceSession.create('/dqn_model.onnx');
+      if (!ortSessionRef.current) {
+        ortSessionRef.current = await ort.InferenceSession.create('/dqn_model.onnx');
+      }
       const input = new ort.Tensor('float32', Float32Array.from(inputArray), [1, inputArray.length]);
-
-      
-      const feeds = { "onnx::Gemm_0": input }; // Replace 'input' with your model's input name
-      const results = await session.run(feeds);
-      // Access output: results[Object.keys(results)[0]]
-      return results;
+      const feeds = { "onnx::Gemm_0": input };
+      return ortSessionRef.current.run(feeds);
     }
 
-    // [go_up, go_down, go_left, go_right, self.gamestate.reward, len(self.gamestate.body)]
+    // Match Python game.py observation():
+    // food(4) + danger(3) + direction(4) + body_len(1)
+    const head = snake[0];
+    const gridW = CANVAS_SIZE / GRID_SIZE;
+    const gridH = CANVAS_SIZE / GRID_SIZE;
 
-    const go_up = snake[0].y < food.y ? 1 : 0;
-    const go_down = snake[0].y > food.y ? 1 : 0;
-    const go_left = snake[0].x < food.x ? 1 : 0;
-    const go_right = snake[0].x > food.x ? 1 : 0
+    const go_up    = food.y < head.y ? 1 : 0;
+    const go_down  = food.y > head.y ? 1 : 0;
+    const go_left  = food.x < head.x ? 1 : 0;
+    const go_right = food.x > head.x ? 1 : 0;
+
+    const bodySet = new Set(snake.map(s => `${s.x},${s.y}`));
+    function isDanger(pt) {
+      return pt.x < 0 || pt.y < 0 || pt.x >= gridW || pt.y >= gridH || bodySet.has(`${pt.x},${pt.y}`);
+    }
+
+    const d = direction;
+    const danger_straight = isDanger({ x: head.x + d.x,  y: head.y + d.y  }) ? 1 : 0;
+    const danger_left     = isDanger({ x: head.x - d.y,  y: head.y + d.x  }) ? 1 : 0;
+    const danger_right    = isDanger({ x: head.x + d.y,  y: head.y - d.x  }) ? 1 : 0;
+
+    const dir_right = d.x === 1  ? 1 : 0;
+    const dir_left  = d.x === -1 ? 1 : 0;
+    const dir_down  = d.y === 1  ? 1 : 0;
+    const dir_up    = d.y === -1 ? 1 : 0;
 
     function argmax(array) {
       let maxIdx = 0;
@@ -74,27 +92,57 @@ export default function SnakeGame() {
       return maxIdx;
     }
 
+    // 7x7 local grid centered on head: 1=wall/body, -1=food, 0=empty
+    const localGrid = [];
+    for (let row = -3; row <= 3; row++) {
+      for (let col = -3; col <= 3; col++) {
+        const cx = head.x + col;
+        const cy = head.y + row;
+        if (cx < 0 || cy < 0 || cx >= gridW || cy >= gridH) {
+          localGrid.push(1.0);   // wall
+        } else if (cx === food.x && cy === food.y) {
+          localGrid.push(-1.0);  // food
+        } else if (bodySet.has(`${cx},${cy}`)) {
+          localGrid.push(1.0);   // body
+        } else {
+          localGrid.push(0.0);   // empty
+        }
+      }
+    }
 
-    var model_output = await runModel([go_up, go_down, go_left, go_right, snake.length]);
+    var model_output = await runModel([
+      go_up, go_down, go_left, go_right,
+      danger_straight, danger_left, danger_right,
+      dir_right, dir_left, dir_down, dir_up,
+      snake.length / (gridW * gridH),
+      ...localGrid
+    ]);
     const pred_dir = argmax(model_output[11].cpuData)
     console.log("Model output:", pred_dir);
 
+    // Compute new direction locally to avoid stale closure in setSnake
+    let newDirection = direction;
     if(pred_dir === 0) {
-      setDirection({ x: 0, y: -1 });
+      newDirection = { x: 0, y: -1 };
     } else if(pred_dir === 1) {
-      setDirection({ x: 1, y: 0 });
+      newDirection = { x: 1, y: 0 };
     } else if(pred_dir === 2) {
-      setDirection({ x: 0, y: 1 });
+      newDirection = { x: 0, y: 1 };
     } else if(pred_dir === 3) {
-      setDirection({ x: -1, y: 0 });
+      newDirection = { x: -1, y: 0 };
     }
+    setDirection(newDirection);
 
     setSnake(currentSnake => {
       const newSnake = [...currentSnake];
-      const head = { x: newSnake[0].x + direction.x, y: newSnake[0].y + direction.y };
+      const head = { x: newSnake[0].x + newDirection.x, y: newSnake[0].y + newDirection.y };
 
-      // Check collision
-      if (checkCollision(head, newSnake)) {
+      // Match Python game.py: remove tail before self-collision check (when not eating food).
+      // This allows the head to legally move into the space the tail is vacating.
+      const willEatFood = head.x === food.x && head.y === food.y;
+      const bodyForCollision = willEatFood ? newSnake : newSnake.slice(0, -1);
+
+      if (checkCollision(head, bodyForCollision)) {
         setGameOver(true);
         return currentSnake;
       }
@@ -102,7 +150,7 @@ export default function SnakeGame() {
       newSnake.unshift(head);
 
       // Check if food is eaten
-      if (head.x === food.x && head.y === food.y) {
+      if (willEatFood) {
         setScore(s => s + 10);
         setFood(generateFood());
       } else {
@@ -111,7 +159,7 @@ export default function SnakeGame() {
 
       return newSnake;
     });
-  }, [direction, food, gameStarted, gameOver, checkCollision, generateFood]);
+  }, [direction, snake, food, gameStarted, gameOver, checkCollision, generateFood]);
 
   // Handle keyboard input
   const handleKeyPress = useCallback(async e => {

@@ -87,15 +87,64 @@ class SnakeGame:
         # map_padded[:,:] = -1
         # map_padded[1:-1, 1:-1] = map
 
-        # direction observation
+        # food direction
         go_up = self.gamestate.food.y < h.y
         go_down = self.gamestate.food.y > h.y
         go_left = self.gamestate.food.x < h.x
         go_right = self.gamestate.food.x > h.x
 
-        # self.gamestate.reward
-        # return np.append(np.array([go_up, go_down, go_left, go_right, len(self.gamestate.body)], dtype=np.float32), local_map.flatten())
-        return np.array([go_up, go_down, go_left, go_right, len(self.gamestate.body)], dtype=np.float32)
+        # danger signals relative to current direction
+        d = self.gamestate.direction
+        body_set = set((b.x, b.y) for b in self.gamestate.body)
+
+        def is_danger(pt):
+            return (pt.x < 0 or pt.y < 0 or
+                    pt.x >= self.gamestate.field_size.x or
+                    pt.y >= self.gamestate.field_size.y or
+                    (pt.x, pt.y) in body_set)
+
+        straight_pt = Point(h.x + d.x, h.y + d.y)
+        left_d      = Point(-d.y, d.x)
+        right_d     = Point(d.y, -d.x)
+        left_pt     = Point(h.x + left_d.x, h.y + left_d.y)
+        right_pt    = Point(h.x + right_d.x, h.y + right_d.y)
+
+        danger_straight = is_danger(straight_pt)
+        danger_left     = is_danger(left_pt)
+        danger_right    = is_danger(right_pt)
+
+        # current direction as one-hot
+        dir_right = d.x == 1
+        dir_left  = d.x == -1
+        dir_down  = d.y == 1
+        dir_up    = d.y == -1
+
+        field_area = self.gamestate.field_size.x * self.gamestate.field_size.y
+
+        # 7x7 local grid centered on head: 1=wall/body, -1=food, 0=empty
+        gr = 3  # grid radius → (2*gr+1) = 7
+        fw, fh = self.gamestate.field_size.x, self.gamestate.field_size.y
+        body_set = {(b.x, b.y) for b in self.gamestate.body}
+        local_grid = np.zeros(49, dtype=np.float32)
+        idx = 0
+        for row in range(-gr, gr + 1):
+            for col in range(-gr, gr + 1):
+                cx, cy = h.x + col, h.y + row
+                if cx < 0 or cy < 0 or cx >= fw or cy >= fh:
+                    local_grid[idx] = 1.0   # wall
+                elif (cx, cy) in body_set:
+                    local_grid[idx] = 1.0   # body
+                elif cx == self.gamestate.food.x and cy == self.gamestate.food.y:
+                    local_grid[idx] = -1.0  # food
+                idx += 1
+
+        scalars = np.array([
+            go_up, go_down, go_left, go_right,
+            danger_straight, danger_left, danger_right,
+            dir_right, dir_left, dir_down, dir_up,
+            len(self.gamestate.body) / field_area
+        ], dtype=np.float32)
+        return np.concatenate([scalars, local_grid])
     
     def draw(self, observation=None):
         map = np.zeros((self.gamestate.field_size.y, self.gamestate.field_size.x), dtype=np.str_)
@@ -165,10 +214,12 @@ class SnakeGame:
 
         old_reward = self.gamestate.reward
 
-        reward = 1.0 + ate_food * 2 + (0 if distance_to_food_improved else -1.0)
-
         if collision:
-            reward = -1
+            reward = -10.0
+        elif ate_food:
+            reward = 10.0
+        else:
+            reward = 0.0
 
         self.gamestate.reward += reward
 

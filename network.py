@@ -2,35 +2,53 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+N_SCALAR = 12
+GRID_SIZE = 7
+
 class DQN(nn.Module):
 
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, n_observations, n_actions, n_scalar=N_SCALAR, grid_size=GRID_SIZE):
         super(DQN, self).__init__()
-        d = 128
-        self.layer1 = nn.Linear(n_observations, d)
-        self.layer2 = nn.Linear(d, d)
-        self.layer3 = nn.Linear(d, n_actions)
+        self.n_scalar = n_scalar
+        self.grid_size = grid_size
 
-        self.dropout = nn.Dropout(p=0.1)
+        # CNN branch for the local grid
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        conv_out_size = 32 * grid_size * grid_size
 
-    # Called with either one element to determine next action, or a batch
-    # during optimization. Returns tensor([[left0exp,right0exp]...]).
+        # FC branch for scalar features
+        self.scalar_fc = nn.Sequential(
+            nn.Linear(n_scalar, 64),
+            nn.ReLU(),
+        )
+
+        # Combined head
+        self.head = nn.Sequential(
+            nn.Linear(conv_out_size + 64, 256),
+            nn.ReLU(),
+            nn.Linear(256, n_actions),
+        )
+
     def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
+        scalar = x[:, :self.n_scalar]
+        grid = x[:, self.n_scalar:].view(-1, 1, self.grid_size, self.grid_size)
 
-        x = self.dropout(x)  # Apply dropout to prevent overfitting
-        return self.layer3(x)
-    
+        conv_out = self.conv(grid).flatten(1)
+        scalar_out = self.scalar_fc(scalar)
+        return self.head(torch.cat([conv_out, scalar_out], dim=1))
+
+
 class EnsembleDQN(nn.Module):
 
     def __init__(self, n_observations, n_actions, n_networks=5):
         super(EnsembleDQN, self).__init__()
         self.networks = nn.ModuleList([DQN(n_observations, n_actions) for _ in range(n_networks)])
 
-        self.dropout = nn.Dropout(p=0.2)  # Dropout layer to prevent overfitting
-
     def forward(self, x):
-        outputs = [net(x) for net in self.networks]
-        outputs = [self.dropout(out) for out in outputs]
-        return torch.stack(outputs).mean(dim=0)
+        outputs = torch.stack([net(x) for net in self.networks])
+        return outputs.mean(dim=0)
