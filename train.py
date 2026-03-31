@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--no-resume', action='store_true', help='Start training from scratch, ignoring any saved model')
 args = parser.parse_args()
 
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 BATCH_SIZE = 128
 GAMMA = 0.99

@@ -121,15 +121,13 @@ export default function SnakeGame() {
     console.log("Model output:", pred_dir);
 
     // Compute new direction locally to avoid stale closure in setSnake
-    let newDirection = direction;
-    if(pred_dir === 0) {
-      newDirection = { x: 0, y: -1 };
-    } else if(pred_dir === 1) {
-      newDirection = { x: 1, y: 0 };
-    } else if(pred_dir === 2) {
-      newDirection = { x: 0, y: 1 };
-    } else if(pred_dir === 3) {
-      newDirection = { x: -1, y: 0 };
+    const dirMap: Record<number, {x: number, y: number}> = {
+      0: { x: 0, y: -1 }, 1: { x: 1, y: 0 }, 2: { x: 0, y: 1 }, 3: { x: -1, y: 0 }
+    };
+    let newDirection = dirMap[pred_dir] ?? direction;
+    // Prevent 180-degree reversal when snake has a body
+    if (snake.length > 1 && newDirection.x + direction.x === 0 && newDirection.y + direction.y === 0) {
+      newDirection = direction;
     }
     setDirection(newDirection);
 

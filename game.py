@@ -160,15 +160,12 @@ class SnakeGame:
 
     def update(self, action : AgentAction):
         
-        match(action):
-            case 0:
-                self.gamestate.direction = Point(0, -1)
-            case 1: 
-                self.gamestate.direction = Point(1, 0)
-            case 2:
-                self.gamestate.direction = Point(0, 1)
-            case 3:
-                self.gamestate.direction = Point(-1, 0)
+        new_dir = {0: Point(0, -1), 1: Point(1, 0), 2: Point(0, 1), 3: Point(-1, 0)}[action]
+        # Prevent 180-degree reversal when snake has a body
+        if len(self.gamestate.body) > 1:
+            if new_dir.x + self.gamestate.direction.x == 0 and new_dir.y + self.gamestate.direction.y == 0:
+                new_dir = self.gamestate.direction
+        self.gamestate.direction = new_dir
 
         next_head_position = self.gamestate.body[0]._add(self.gamestate.direction)
 
@@ -218,19 +215,18 @@ class SnakeGame:
             reward = -10.0
         elif ate_food:
             reward = 10.0
+        elif distance_to_food_new < distance_to_food:
+            reward = 1.0
         else:
-            reward = 0.0
+            reward = -1.0
 
         self.gamestate.reward += reward
 
-        if self.gamestate.reward != old_reward:
+        if ate_food:
             self.gamestate.last_reward_change = self.gamestate.steps
 
-        if abs(self.gamestate.last_reward_change - self.gamestate.steps) > 50 * len(self.gamestate.body):
+        if self.gamestate.steps - self.gamestate.last_reward_change > 50 * len(self.gamestate.body):
             terminated = True
-
-        # if self.gamestate.reward < 0:
-        #     terminated = True
 
         self.gamestate.steps += 1
 
